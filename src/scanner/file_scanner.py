@@ -1,92 +1,82 @@
-"""
-Module for scanning NAS directories and cataloging files.
-Provides functionality to recursively traverse directories and collect file metadata.
-"""
-
-from pathlib import Path
 import logging
-from typing import Generator, Dict, Optional
-from datetime import datetime
-import time
+from pathlib import Path
+from typing import Dict, List
 
+class FileScanner:
+    """Enhanced scanner with detailed logging and memory tracking."""
 
-class NASScanner:
-    """
-    A scanner that explores NAS directories and catalogs files with network resilience.
-    Includes retry mechanisms for handling temporary network issues.
-    """
-
-    def __init__(
-        self, root_path: str, retry_attempts: int = 3, retry_delay: float = 1.0
-    ):
-        """
-        Initialize the NAS scanner with retry capabilities for network resilience.
-
-        Args:
-            root_path: The base path to scan on the NAS
-            retry_attempts: Number of times to retry if a network error occurs
-            retry_delay: Time to wait between retries (in seconds)
-        """
+    def __init__(self, root_path: str):
+        """Initialize scanner with root path."""
         self.root_path = Path(root_path)
-        self.retry_attempts = retry_attempts
-        self.retry_delay = retry_delay
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger(__name__)
+        self.is_scanning = False
+        self.total_files = 0
+        self.processed_files = 0
+        self.current_directory = ''
+        self.results = {'files': [], 'errors': []}
 
-    def scan_with_retry(self, path: Path) -> Optional[Dict[str, str]]:
-        """
-        Attempts to scan a file with retry logic for network resilience.
-        Like a librarian who doesn't give up after finding a locked door,
-        but tries again a few times before moving on.
-        """
-        for attempt in range(self.retry_attempts):
-            try:
-                if not path.is_file():
-                    return None
+        # Set up dedicated scanner logger
+        self.logger = logging.getLogger('scanner')
+        handler = logging.FileHandler('scanner.log')
+        handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
 
-                stats = path.stat()
-                return {
-                    "path": str(path.absolute()),
-                    "name": path.name,
-                    "extension": path.suffix.lower(),
-                    "size": stats.st_size,
-                    "created": self.format_timestamp(stats.st_ctime),
-                    "modified": self.format_timestamp(stats.st_mtime),
-                }
-            except OSError as e:
-                if attempt < self.retry_attempts - 1:
-                    self.logger.warning(
-                        "Retry %d: Error accessing %s: %s", attempt + 1, path, e
-                    )
-                    time.sleep(self.retry_delay)
-                else:
-                    self.logger.error(
-                        "Failed to access %s after %d attempts: %s",
-                        path,
-                        self.retry_attempts,
-                        e,
-                    )
-                    return None
-
-    def scan_directory(self) -> Generator[Dict[str, str], None, None]:
-        """
-        Scans the NAS directory with improved error handling and network resilience.
-        """
-        self.logger.info("Starting scan from %s", self.root_path)
+    def scan_directory(self) -> Dict[str, List]:
+        """Scan directory with detailed logging."""
+        self.is_scanning = True
+        results = {
+            'files': [],
+            'errors': []
+        }
 
         try:
-            for entry in self.root_path.rglob("*"):
-                file_info = self.scan_with_retry(entry)
-                if file_info:
-                    self.logger.debug("Found file: %s", file_info["name"])
-                    yield file_info
+            print(f"Starting scan of {self.root_path}")
 
-        except OSError as e:
-            self.logger.error("Error scanning directory: %s", e)
-            raise
+            # First count total files
+            self.total_files = sum(1 for _ in self.root_path.rglob('*') if _.is_file())
+            print(f"Found total of {self.total_files} files")
 
-    def format_timestamp(self, timestamp: float) -> str:
-        """
-        Converts a Unix timestamp into a human-readable date string.
-        """
-        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            # Then process them
+            for file_path in self.root_path.rglob('*'):
+                try:
+                    if file_path.is_file():
+                        file_info = self.scan(file_path)
+                        if file_info:
+                            results['files'].append(file_info)
+                            self.processed_files += 1
+
+                        if self.processed_files % 100 == 0:
+                            print(f"Processed {self.processed_files} of {self.total_files} files...")
+
+                except PermissionError as e:
+                    error_msg = f"Permission error on {file_path}: {e}"
+                    print(error_msg)
+                    results['errors'].append(error_msg)
+                    continue
+                except OSError as e:
+                    error_msg = f"OS error on {file_path}: {e}"
+                    print(error_msg)
+                    results['errors'].append(error_msg)
+                    continue
+
+            return results
+
+        finally:
+            self.is_scanning = False
+
+    def scan(self, file_path: Path) -> Dict:
+        """Scan single file and return metadata."""
+        try:
+            stats = file_path.stat()
+            return {
+                'path': str(file_path),
+                'name': file_path.name,
+                'extension': file_path.suffix.lower(),
+                'size': stats.st_size,
+                'modified': stats.st_mtime,
+                'is_image': file_path.suffix.lower() in {'.jpg', '.jpeg', '.png', '.gif', '.heic'}
+            }
+        except (OSError, PermissionError) as e:
+            self.logger.error("Error scanning file %s: %s", file_path, e)
+            return None
